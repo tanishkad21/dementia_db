@@ -4,21 +4,18 @@ import psycopg2
 import os
 from werkzeug.security import generate_password_hash, check_password_hash
 
-
 app = Flask(__name__)
 
+# Securely Load Environment Variables
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
 jwt = JWTManager(app)
 
-
-# Securely Load Database URL
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("ERROR: DATABASE_URL is missing!")
 
 # Database Connection Function
 def get_db_connection():
-    """Connect to PostgreSQL database on Neon.tech"""
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
@@ -32,14 +29,14 @@ def get_db_connection():
 def home():
     return jsonify({"message": "Flask API is running on Render!"})
 
-# Register User
+# Register User (Patients & Caregivers)
 @app.route("/register", methods=["POST"])
 def register():
     data = request.get_json()
     username, password, name, role = data.get("username"), data.get("password"), data.get("name", "Unnamed User"), data.get("role", "patient")
 
-    if not username or not password:
-        return jsonify({"error": "Missing username or password"}), 400
+    if not username or not password or role not in ["patient", "caregiver"]:
+        return jsonify({"error": "Invalid registration data"}), 400
 
     hashed_password = generate_password_hash(password)
     conn, cur = get_db_connection()
@@ -49,7 +46,7 @@ def register():
     try:
         cur.execute("INSERT INTO users (name, username, password, role) VALUES (%s, %s, %s, %s)", (name, username, hashed_password, role))
         conn.commit()
-        return jsonify({"message": "User registered successfully!", "username": username, "role": role})
+        return jsonify({"message": "User registered successfully!"})
     except psycopg2.Error as e:
         conn.rollback()
         return jsonify({"error": str(e)}), 400
@@ -57,7 +54,27 @@ def register():
         cur.close()
         conn.close()
 
-#  Assign a Caregiver to a Patient
+# Login & Generate JWT Token
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.get_json()
+    username, password = data.get("username"), data.get("password")
+
+    conn, cur = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Database connection failed"}), 500
+
+    cur.execute("SELECT id, username, password, role FROM users WHERE username = %s", (username,))
+    user = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if user and check_password_hash(user[2], password):
+        token = create_access_token(identity={"id": user[0], "username": user[1], "role": user[3]})
+        return jsonify({"token": token, "role": user[3]})
+    return jsonify({"error": "Invalid username or password"}), 401
+
+# Assign Caregiver to Patient
 @app.route("/assign-caregiver", methods=["POST"])
 @jwt_required()
 def assign_caregiver():
@@ -67,13 +84,19 @@ def assign_caregiver():
 
     data = request.get_json()
     caregiver_id = data.get("caregiver_id")
+    can_edit_appointments = data.get("can_edit_appointments", False)
+    can_edit_medications = data.get("can_edit_medications", False)
+    can_view_daily_tasks = data.get("can_view_daily_tasks", True)
 
     conn, cur = get_db_connection()
     if not conn:
         return jsonify({"error": "Database connection failed"}), 500
 
     try:
-        cur.execute("INSERT INTO caregiver_access (patient_id, caregiver_id) VALUES (%s, %s)", (current_user["id"], caregiver_id))
+        cur.execute(
+            "INSERT INTO caregiver_access (patient_id, caregiver_id, can_edit_appointments, can_edit_medications, can_view_daily_tasks) VALUES (%s, %s, %s, %s, %s)", 
+            (current_user["id"], caregiver_id, can_edit_appointments, can_edit_medications, can_view_daily_tasks)
+        )
         conn.commit()
         return jsonify({"message": "Caregiver assigned successfully!"})
     except psycopg2.Error as e:
@@ -83,28 +106,24 @@ def assign_caregiver():
         cur.close()
         conn.close()
 
-#  Get Patient Data (Caregivers Can View)
+# Retrieve Patient Data (Caregivers View Only)
 @app.route("/patient-data/<int:patient_id>", methods=["GET"])
 @jwt_required()
 def get_patient_data(patient_id):
     current_user = get_jwt_identity()
-
     conn, cur = get_db_connection()
     if not conn:
         return jsonify({"error": "Database connection failed"}), 500
 
-    # Check if caregiver has access
     cur.execute("SELECT * FROM caregiver_access WHERE caregiver_id = %s AND patient_id = %s", (current_user["id"], patient_id))
     access = cur.fetchone()
     
     if not access:
-        return jsonify({"error": "You do not have permission to view this patient's data"}), 403
+        return jsonify({"error": "Access denied"}), 403
 
-    # Fetch patient details
     cur.execute("SELECT id, name, username FROM users WHERE id = %s", (patient_id,))
     patient = cur.fetchone()
 
-    # Fetch patient’s appointments, medications, and tasks
     cur.execute("SELECT id, title, date, description FROM appointments WHERE user_id = %s", (patient_id,))
     appointments = cur.fetchall()
 
@@ -124,6 +143,47 @@ def get_patient_data(patient_id):
         "daily_tasks": [{"id": task[0], "name": task[1], "location": task[2], "time": task[3], "frequency": task[4]} for task in daily_tasks]
     })
 
-# Run Flask only in Development Mode
+# Generate Daily Report for Caregivers
+@app.route("/generate-report/<int:patient_id>", methods=["POST"])
+@jwt_required()
+def generate_report(patient_id):
+    current_user = get_jwt_identity()
+    
+    conn, cur = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Database connection failed"}), 500
+
+    cur.execute("SELECT * FROM caregiver_access WHERE caregiver_id = %s AND patient_id = %s", (current_user["id"], patient_id))
+    access = cur.fetchone()
+    
+    if not access:
+        return jsonify({"error": "Access denied"}), 403
+
+    cur.execute("SELECT COUNT(*) FROM daily_tasks WHERE user_id = %s", (patient_id,))
+    tasks_completed = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM medications WHERE user_id = %s AND is_taken = TRUE", (patient_id,))
+    medications_taken = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM appointments WHERE user_id = %s", (patient_id,))
+    appointments_attended = cur.fetchone()[0]
+
+    cur.execute(
+        "INSERT INTO daily_reports (patient_id, caregiver_id, completed_tasks, medications_taken, appointments_summary) VALUES (%s, %s, %s, %s, %s)",
+        (patient_id, current_user["id"], tasks_completed, medications_taken, appointments_attended)
+    )
+    conn.commit()
+    return jsonify({"message": "Daily report generated!"})
+
+# Start the Flask Application
 if __name__ == "__main__":
-    gunicorn_app = app  # Required for production
+    from gunicorn.app.base import BaseApplication
+
+    class GunicornApp(BaseApplication):
+        def load_config(self):
+            self.cfg.set("bind", "0.0.0.0:10000")
+
+        def load(self):
+            return app
+
+    GunicornApp().run()
