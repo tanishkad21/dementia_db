@@ -7,7 +7,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 
-app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "c780704a2cff91d016ecd5315b3b38cc465ddd862d7d497aa66517dc645b865566b2b0792d830dd47114f0caa9597d9c863d65282c699d54a1249ffa818994eb")
+app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
 jwt = JWTManager(app)
 
 
