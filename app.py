@@ -29,7 +29,7 @@ def get_db_connection():
 def home():
     return jsonify({"message": "Flask API is running on Render!"})
 
-# Register User (Patients & Caregivers)
+#  Register User (Patients & Caregivers)
 @app.route("/register", methods=["POST"])
 def register():
     data = request.get_json()
@@ -58,7 +58,7 @@ def register():
         cur.close()
         conn.close()
 
-# Login & Generate JWT Token
+#  Login & Generate JWT Token
 @app.route("/login", methods=["POST"])
 def login():
     data = request.get_json()
@@ -74,24 +74,15 @@ def login():
     conn.close()
 
     if user and check_password_hash(user[2], password):
-        token = create_access_token(identity={"id": user[0], "username": user[1], "role": user[3]})
+        token = create_access_token(identity=str(user[0]))  #  Ensure identity is a string
         return jsonify({"token": token, "role": user[3]})
     return jsonify({"error": "Invalid username or password"}), 401
 
-# Assign Caregiver to Patient
+#  Assign Caregiver to Patient
 @app.route("/assign-caregiver", methods=["POST"])
 @jwt_required()
 def assign_caregiver():
-    current_user = get_jwt_identity()
-    
-    # 🔥 Fix: Ensure current_user is extracted properly
-    if isinstance(current_user, dict):
-        patient_id = current_user.get("id")
-    else:
-        return jsonify({"error": "Invalid token format"}), 400
-
-    if current_user.get("role") != "patient":
-        return jsonify({"error": "Only patients can assign caregivers"}), 403
+    patient_id = int(get_jwt_identity())  # Convert back to int
 
     data = request.get_json()
     caregiver_id = data.get("caregiver_id")
@@ -117,48 +108,86 @@ def assign_caregiver():
         cur.close()
         conn.close()
 
-# Retrieve Patient Data (Caregivers View Only)
-@app.route("/patient-data/<int:patient_id>", methods=["GET"])
+#  Add Appointment
+@app.route("/appointments", methods=["POST"])
 @jwt_required()
-def get_patient_data(patient_id):
-    current_user = get_jwt_identity()
-    
-    if isinstance(current_user, dict):
-        caregiver_id = current_user.get("id")
-    else:
-        return jsonify({"error": "Invalid token format"}), 400
+def add_appointment():
+    user_id = int(get_jwt_identity())
+
+    data = request.get_json()
+    title, date, description = data.get("title"), data.get("date"), data.get("description")
 
     conn, cur = get_db_connection()
     if not conn:
         return jsonify({"error": "Database connection failed"}), 500
 
-    cur.execute("SELECT * FROM caregiver_access WHERE caregiver_id = %s AND patient_id = %s", (caregiver_id, patient_id))
-    access = cur.fetchone()
-    
-    if not access:
-        return jsonify({"error": "Access denied"}), 403
+    try:
+        cur.execute(
+            "INSERT INTO appointments (user_id, title, date, description) VALUES (%s, %s, %s, %s) RETURNING id",
+            (user_id, title, date, description)
+        )
+        conn.commit()
+        return jsonify({"message": "Appointment added successfully!"})
+    except psycopg2.Error as e:
+        conn.rollback()
+        return jsonify({"error": str(e)}), 400
+    finally:
+        cur.close()
+        conn.close()
 
-    cur.execute("SELECT id, name, username FROM users WHERE id = %s", (patient_id,))
-    patient = cur.fetchone()
+#  Add Medication
+@app.route("/medications", methods=["POST"])
+@jwt_required()
+def add_medication():
+    user_id = int(get_jwt_identity())
 
-    cur.execute("SELECT id, title, date, description FROM appointments WHERE user_id = %s", (patient_id,))
-    appointments = cur.fetchall()
+    data = request.get_json()
+    name, dosage, time, duration = data.get("name"), data.get("dosage"), data.get("time"), data.get("duration")
 
-    cur.execute("SELECT id, name, dosage, time, duration FROM medications WHERE user_id = %s", (patient_id,))
-    medications = cur.fetchall()
+    conn, cur = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Database connection failed"}), 500
 
-    cur.execute("SELECT id, name, location, time, frequency FROM daily_tasks WHERE user_id = %s", (patient_id,))
-    daily_tasks = cur.fetchall()
+    try:
+        cur.execute(
+            "INSERT INTO medications (user_id, name, dosage, time, duration) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (user_id, name, dosage, time, duration)
+        )
+        conn.commit()
+        return jsonify({"message": "Medication added successfully!"})
+    except psycopg2.Error as e:
+        conn.rollback()
+        return jsonify({"error": str(e)}), 400
+    finally:
+        cur.close()
+        conn.close()
 
-    cur.close()
-    conn.close()
+#  Add Daily Task
+@app.route("/daily-tasks", methods=["POST"])
+@jwt_required()
+def add_daily_task():
+    user_id = int(get_jwt_identity())
 
-    return jsonify({
-        "patient": {"id": patient[0], "name": patient[1], "username": patient[2]},
-        "appointments": [{"id": appt[0], "title": appt[1], "date": appt[2], "description": appt[3]} for appt in appointments],
-        "medications": [{"id": med[0], "name": med[1], "dosage": med[2], "time": med[3], "duration": med[4]} for med in medications],
-        "daily_tasks": [{"id": task[0], "name": task[1], "location": task[2], "time": task[3], "frequency": task[4]} for task in daily_tasks]
-    })
+    data = request.get_json()
+    name, location, time, frequency = data.get("name"), data.get("location"), data.get("time"), data.get("frequency")
+
+    conn, cur = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Database connection failed"}), 500
+
+    try:
+        cur.execute(
+            "INSERT INTO daily_tasks (user_id, name, location, time, frequency) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (user_id, name, location, time, frequency)
+        )
+        conn.commit()
+        return jsonify({"message": "Daily task added successfully!"})
+    except psycopg2.Error as e:
+        conn.rollback()
+        return jsonify({"error": str(e)}), 400
+    finally:
+        cur.close()
+        conn.close()
 
 #  Start the Flask Application
 if __name__ == "__main__":
