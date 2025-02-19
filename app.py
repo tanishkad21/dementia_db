@@ -24,12 +24,12 @@ def get_db_connection():
         print(f"❌ Database Connection Error: {e}")
         return None, None
 
-#  API Status Check
+# API Status Check
 @app.route("/")
 def home():
     return jsonify({"message": "Flask API is running on Render!"})
 
-#  Register User (Patients & Caregivers)
+# Register User
 @app.route("/register", methods=["POST"])
 def register():
     data = request.get_json()
@@ -58,7 +58,7 @@ def register():
         cur.close()
         conn.close()
 
-#  Login & Generate JWT Token
+# Login
 @app.route("/login", methods=["POST"])
 def login():
     data = request.get_json()
@@ -74,15 +74,17 @@ def login():
     conn.close()
 
     if user and check_password_hash(user[2], password):
-        token = create_access_token(identity=str(user[0]))  #  Ensure identity is a string
+        token = create_access_token(identity={"id": user[0], "username": user[1], "role": user[3]})
         return jsonify({"token": token, "role": user[3]})
     return jsonify({"error": "Invalid username or password"}), 401
 
-#  Assign Caregiver to Patient
+# Assign Caregiver
 @app.route("/assign-caregiver", methods=["POST"])
 @jwt_required()
 def assign_caregiver():
-    patient_id = int(get_jwt_identity())  # Convert back to int
+    current_user = get_jwt_identity()
+    if current_user["role"] != "patient":
+        return jsonify({"error": "Only patients can assign caregivers"}), 403
 
     data = request.get_json()
     caregiver_id = data.get("caregiver_id")
@@ -97,7 +99,7 @@ def assign_caregiver():
     try:
         cur.execute(
             "INSERT INTO caregiver_access (patient_id, caregiver_id, can_edit_appointments, can_edit_medications, can_view_daily_tasks) VALUES (%s, %s, %s, %s, %s)", 
-            (patient_id, caregiver_id, can_edit_appointments, can_edit_medications, can_view_daily_tasks)
+            (current_user["id"], caregiver_id, can_edit_appointments, can_edit_medications, can_view_daily_tasks)
         )
         conn.commit()
         return jsonify({"message": "Caregiver assigned successfully!"})
@@ -108,88 +110,77 @@ def assign_caregiver():
         cur.close()
         conn.close()
 
-#  Add Appointment
-@app.route("/appointments", methods=["POST"])
+# Retrieve Patient Data
+@app.route("/patient-data/<int:patient_id>", methods=["GET"])
 @jwt_required()
-def add_appointment():
-    user_id = int(get_jwt_identity())
-
-    data = request.get_json()
-    title, date, description = data.get("title"), data.get("date"), data.get("description")
+def get_patient_data(patient_id):
+    current_user = get_jwt_identity()
 
     conn, cur = get_db_connection()
     if not conn:
         return jsonify({"error": "Database connection failed"}), 500
 
-    try:
-        cur.execute(
-            "INSERT INTO appointments (user_id, title, date, description) VALUES (%s, %s, %s, %s) RETURNING id",
-            (user_id, title, date, description)
-        )
-        conn.commit()
-        return jsonify({"message": "Appointment added successfully!"})
-    except psycopg2.Error as e:
-        conn.rollback()
-        return jsonify({"error": str(e)}), 400
-    finally:
-        cur.close()
-        conn.close()
+    # Verify caregiver access
+    cur.execute("SELECT * FROM caregiver_access WHERE caregiver_id = %s AND patient_id = %s", (current_user["id"], patient_id))
+    access = cur.fetchone()
+    if not access:
+        return jsonify({"error": "Access denied"}), 403
 
-#  Add Medication
-@app.route("/medications", methods=["POST"])
+    # Fetch patient details
+    cur.execute("SELECT id, name, username FROM users WHERE id = %s", (patient_id,))
+    patient = cur.fetchone()
+
+    cur.execute("SELECT id, title, date, description FROM appointments WHERE user_id = %s", (patient_id,))
+    appointments = cur.fetchall()
+
+    cur.execute("SELECT id, name, dosage, time, duration FROM medications WHERE user_id = %s", (patient_id,))
+    medications = cur.fetchall()
+
+    cur.execute("SELECT id, name, location, time, frequency FROM daily_tasks WHERE user_id = %s", (patient_id,))
+    daily_tasks = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return jsonify({
+        "patient": {"id": patient[0], "name": patient[1], "username": patient[2]},
+        "appointments": [{"id": appt[0], "title": appt[1], "date": appt[2], "description": appt[3]} for appt in appointments],
+        "medications": [{"id": med[0], "name": med[1], "dosage": med[2], "time": med[3], "duration": med[4]} for med in medications],
+        "daily_tasks": [{"id": task[0], "name": task[1], "location": task[2], "time": task[3], "frequency": task[4]} for task in daily_tasks]
+    })
+
+# Generate Daily Report
+@app.route("/generate-report/<int:patient_id>", methods=["POST"])
 @jwt_required()
-def add_medication():
-    user_id = int(get_jwt_identity())
-
-    data = request.get_json()
-    name, dosage, time, duration = data.get("name"), data.get("dosage"), data.get("time"), data.get("duration")
+def generate_report(patient_id):
+    current_user = get_jwt_identity()
 
     conn, cur = get_db_connection()
     if not conn:
         return jsonify({"error": "Database connection failed"}), 500
 
-    try:
-        cur.execute(
-            "INSERT INTO medications (user_id, name, dosage, time, duration) VALUES (%s, %s, %s, %s, %s) RETURNING id",
-            (user_id, name, dosage, time, duration)
-        )
-        conn.commit()
-        return jsonify({"message": "Medication added successfully!"})
-    except psycopg2.Error as e:
-        conn.rollback()
-        return jsonify({"error": str(e)}), 400
-    finally:
-        cur.close()
-        conn.close()
+    # Check if caregiver has access
+    cur.execute("SELECT * FROM caregiver_access WHERE caregiver_id = %s AND patient_id = %s", (current_user["id"], patient_id))
+    access = cur.fetchone()
+    if not access:
+        return jsonify({"error": "Access denied"}), 403
 
-#  Add Daily Task
-@app.route("/daily-tasks", methods=["POST"])
-@jwt_required()
-def add_daily_task():
-    user_id = int(get_jwt_identity())
+    cur.execute("SELECT COUNT(*) FROM daily_tasks WHERE user_id = %s", (patient_id,))
+    tasks_completed = cur.fetchone()[0]
 
-    data = request.get_json()
-    name, location, time, frequency = data.get("name"), data.get("location"), data.get("time"), data.get("frequency")
+    cur.execute("SELECT COUNT(*) FROM medications WHERE user_id = %s AND is_taken = TRUE", (patient_id,))
+    medications_taken = cur.fetchone()[0]
 
-    conn, cur = get_db_connection()
-    if not conn:
-        return jsonify({"error": "Database connection failed"}), 500
+    cur.execute("SELECT COUNT(*) FROM appointments WHERE user_id = %s", (patient_id,))
+    appointments_attended = cur.fetchone()[0]
 
-    try:
-        cur.execute(
-            "INSERT INTO daily_tasks (user_id, name, location, time, frequency) VALUES (%s, %s, %s, %s, %s) RETURNING id",
-            (user_id, name, location, time, frequency)
-        )
-        conn.commit()
-        return jsonify({"message": "Daily task added successfully!"})
-    except psycopg2.Error as e:
-        conn.rollback()
-        return jsonify({"error": str(e)}), 400
-    finally:
-        cur.close()
-        conn.close()
+    cur.execute(
+        "INSERT INTO daily_reports (patient_id, caregiver_id, completed_tasks, medications_taken, appointments_summary) VALUES (%s, %s, %s, %s, %s)",
+        (patient_id, current_user["id"], tasks_completed, medications_taken, appointments_attended)
+    )
+    conn.commit()
+    return jsonify({"message": "Daily report generated!"})
 
-#  Start the Flask Application
 if __name__ == "__main__":
     from gunicorn.app.base import BaseApplication
 
