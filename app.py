@@ -126,4 +126,4 @@ def get_patient_data(patient_id):
 
 # Run Flask only in Development Mode
 if __name__ == "__main__":
-    app.run(debug=False, host="0.0.0.0", port=5000)  # Required for production
+    gunicorn_app = app  # Required for production
