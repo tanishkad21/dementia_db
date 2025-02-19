@@ -29,7 +29,7 @@ def get_db_connection():
 def home():
     return jsonify({"message": "Flask API is running on Render!"})
 
-# Register User
+# Register User (Patients & Caregivers)
 @app.route("/register", methods=["POST"])
 def register():
     data = request.get_json()
@@ -58,7 +58,7 @@ def register():
         cur.close()
         conn.close()
 
-# Login
+# Login & Generate JWT Token
 @app.route("/login", methods=["POST"])
 def login():
     data = request.get_json()
@@ -78,31 +78,36 @@ def login():
         return jsonify({"token": token, "role": user[3]})
     return jsonify({"error": "Invalid username or password"}), 401
 
-# Assign Caregiver
-@app.route("/assign-caregiver", methods=["POST"])
+# Send Caregiver Invite (Patient Only)
+@app.route("/invite-caregiver", methods=["POST"])
 @jwt_required()
-def assign_caregiver():
+def invite_caregiver():
     current_user = get_jwt_identity()
     if current_user["role"] != "patient":
-        return jsonify({"error": "Only patients can assign caregivers"}), 403
+        return jsonify({"error": "Only patients can invite caregivers"}), 403
 
     data = request.get_json()
-    caregiver_id = data.get("caregiver_id")
-    can_edit_appointments = data.get("can_edit_appointments", False)
-    can_edit_medications = data.get("can_edit_medications", False)
-    can_view_daily_tasks = data.get("can_view_daily_tasks", True)
+    caregiver_username = data.get("caregiver_username")
 
     conn, cur = get_db_connection()
     if not conn:
         return jsonify({"error": "Database connection failed"}), 500
 
+    # Check if caregiver exists
+    cur.execute("SELECT id FROM users WHERE username = %s AND role = 'caregiver'", (caregiver_username,))
+    caregiver = cur.fetchone()
+    if not caregiver:
+        return jsonify({"error": "Caregiver not found"}), 404
+
+    caregiver_id = caregiver[0]
+
     try:
         cur.execute(
-            "INSERT INTO caregiver_access (patient_id, caregiver_id, can_edit_appointments, can_edit_medications, can_view_daily_tasks) VALUES (%s, %s, %s, %s, %s)", 
-            (current_user["id"], caregiver_id, can_edit_appointments, can_edit_medications, can_view_daily_tasks)
+            "INSERT INTO caregiver_invites (patient_id, caregiver_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (current_user["id"], caregiver_id)
         )
         conn.commit()
-        return jsonify({"message": "Caregiver assigned successfully!"})
+        return jsonify({"message": "Caregiver invite sent successfully!"})
     except psycopg2.Error as e:
         conn.rollback()
         return jsonify({"error": str(e)}), 400
@@ -110,85 +115,94 @@ def assign_caregiver():
         cur.close()
         conn.close()
 
-# Retrieve Patient Data
-@app.route("/patient-data/<int:patient_id>", methods=["GET"])
+# Get Pending Invites (Caregiver Only)
+@app.route("/pending-invites", methods=["GET"])
 @jwt_required()
-def get_patient_data(patient_id):
+def pending_invites():
     current_user = get_jwt_identity()
+    if current_user["role"] != "caregiver":
+        return jsonify({"error": "Only caregivers can view invites"}), 403
 
     conn, cur = get_db_connection()
     if not conn:
         return jsonify({"error": "Database connection failed"}), 500
 
-    # Verify caregiver access
-    cur.execute("SELECT * FROM caregiver_access WHERE caregiver_id = %s AND patient_id = %s", (current_user["id"], patient_id))
-    access = cur.fetchone()
-    if not access:
-        return jsonify({"error": "Access denied"}), 403
-
-    # Fetch patient details
-    cur.execute("SELECT id, name, username FROM users WHERE id = %s", (patient_id,))
-    patient = cur.fetchone()
-
-    cur.execute("SELECT id, title, date, description FROM appointments WHERE user_id = %s", (patient_id,))
-    appointments = cur.fetchall()
-
-    cur.execute("SELECT id, name, dosage, time, duration FROM medications WHERE user_id = %s", (patient_id,))
-    medications = cur.fetchall()
-
-    cur.execute("SELECT id, name, location, time, frequency FROM daily_tasks WHERE user_id = %s", (patient_id,))
-    daily_tasks = cur.fetchall()
-
+    cur.execute(
+        "SELECT patient_id FROM caregiver_invites WHERE caregiver_id = %s AND status = 'pending'",
+        (current_user["id"],)
+    )
+    invites = cur.fetchall()
+    
     cur.close()
     conn.close()
 
-    return jsonify({
-        "patient": {"id": patient[0], "name": patient[1], "username": patient[2]},
-        "appointments": [{"id": appt[0], "title": appt[1], "date": appt[2], "description": appt[3]} for appt in appointments],
-        "medications": [{"id": med[0], "name": med[1], "dosage": med[2], "time": med[3], "duration": med[4]} for med in medications],
-        "daily_tasks": [{"id": task[0], "name": task[1], "location": task[2], "time": task[3], "frequency": task[4]} for task in daily_tasks]
-    })
+    return jsonify({"pending_invites": [invite[0] for invite in invites]})
 
-# Generate Daily Report
-@app.route("/generate-report/<int:patient_id>", methods=["POST"])
+# Accept Invite (Caregiver Only)
+@app.route("/accept-invite", methods=["POST"])
 @jwt_required()
-def generate_report(patient_id):
+def accept_invite():
     current_user = get_jwt_identity()
+    if current_user["role"] != "caregiver":
+        return jsonify({"error": "Only caregivers can accept invites"}), 403
+
+    data = request.get_json()
+    patient_id = data.get("patient_id")
 
     conn, cur = get_db_connection()
     if not conn:
         return jsonify({"error": "Database connection failed"}), 500
 
-    # Check if caregiver has access
-    cur.execute("SELECT * FROM caregiver_access WHERE caregiver_id = %s AND patient_id = %s", (current_user["id"], patient_id))
-    access = cur.fetchone()
-    if not access:
-        return jsonify({"error": "Access denied"}), 403
+    try:
+        # Update invite status
+        cur.execute(
+            "UPDATE caregiver_invites SET status = 'accepted' WHERE patient_id = %s AND caregiver_id = %s",
+            (patient_id, current_user["id"])
+        )
 
-    cur.execute("SELECT COUNT(*) FROM daily_tasks WHERE user_id = %s", (patient_id,))
-    tasks_completed = cur.fetchone()[0]
+        # Add to `caregiver_access`
+        cur.execute(
+            "INSERT INTO caregiver_access (patient_id, caregiver_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (patient_id, current_user["id"])
+        )
 
-    cur.execute("SELECT COUNT(*) FROM medications WHERE user_id = %s AND is_taken = TRUE", (patient_id,))
-    medications_taken = cur.fetchone()[0]
+        conn.commit()
+        return jsonify({"message": "Caregiver invite accepted!"})
+    except psycopg2.Error as e:
+        conn.rollback()
+        return jsonify({"error": str(e)}), 400
+    finally:
+        cur.close()
+        conn.close()
 
-    cur.execute("SELECT COUNT(*) FROM appointments WHERE user_id = %s", (patient_id,))
-    appointments_attended = cur.fetchone()[0]
+# Decline Invite (Caregiver Only)
+@app.route("/decline-invite", methods=["POST"])
+@jwt_required()
+def decline_invite():
+    current_user = get_jwt_identity()
+    if current_user["role"] != "caregiver":
+        return jsonify({"error": "Only caregivers can decline invites"}), 403
 
-    cur.execute(
-        "INSERT INTO daily_reports (patient_id, caregiver_id, completed_tasks, medications_taken, appointments_summary) VALUES (%s, %s, %s, %s, %s)",
-        (patient_id, current_user["id"], tasks_completed, medications_taken, appointments_attended)
-    )
-    conn.commit()
-    return jsonify({"message": "Daily report generated!"})
+    data = request.get_json()
+    patient_id = data.get("patient_id")
+
+    conn, cur = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Database connection failed"}), 500
+
+    try:
+        cur.execute(
+            "UPDATE caregiver_invites SET status = 'declined' WHERE patient_id = %s AND caregiver_id = %s",
+            (patient_id, current_user["id"])
+        )
+        conn.commit()
+        return jsonify({"message": "Caregiver invite declined!"})
+    except psycopg2.Error as e:
+        conn.rollback()
+        return jsonify({"error": str(e)}), 400
+    finally:
+        cur.close()
+        conn.close()
 
 if __name__ == "__main__":
-    from gunicorn.app.base import BaseApplication
-
-    class GunicornApp(BaseApplication):
-        def load_config(self):
-            self.cfg.set("bind", "0.0.0.0:10000")
-
-        def load(self):
-            return app
-
-    GunicornApp().run()
+    app.run(debug=True)
