@@ -83,6 +83,9 @@ def login():
 @jwt_required()
 def invite_caregiver():
     current_user = get_jwt_identity()
+    if isinstance(current_user, str):
+        return jsonify({"error": "Token format issue"}), 400
+
     if current_user["role"] != "patient":
         return jsonify({"error": "Only patients can invite caregivers"}), 403
 
@@ -93,7 +96,6 @@ def invite_caregiver():
     if not conn:
         return jsonify({"error": "Database connection failed"}), 500
 
-    # Check if caregiver exists
     cur.execute("SELECT id FROM users WHERE username = %s AND role = 'caregiver'", (caregiver_username,))
     caregiver = cur.fetchone()
     if not caregiver:
@@ -103,7 +105,7 @@ def invite_caregiver():
 
     try:
         cur.execute(
-            "INSERT INTO caregiver_invites (patient_id, caregiver_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            "INSERT INTO caregiver_invites (patient_id, caregiver_id, status) VALUES (%s, %s, 'pending') ON CONFLICT DO NOTHING",
             (current_user["id"], caregiver_id)
         )
         conn.commit()
@@ -120,6 +122,9 @@ def invite_caregiver():
 @jwt_required()
 def pending_invites():
     current_user = get_jwt_identity()
+    if isinstance(current_user, str):
+        return jsonify({"error": "Token format issue"}), 400
+
     if current_user["role"] != "caregiver":
         return jsonify({"error": "Only caregivers can view invites"}), 403
 
@@ -143,6 +148,9 @@ def pending_invites():
 @jwt_required()
 def accept_invite():
     current_user = get_jwt_identity()
+    if isinstance(current_user, str):
+        return jsonify({"error": "Token format issue"}), 400
+
     if current_user["role"] != "caregiver":
         return jsonify({"error": "Only caregivers can accept invites"}), 403
 
@@ -154,49 +162,16 @@ def accept_invite():
         return jsonify({"error": "Database connection failed"}), 500
 
     try:
-        # Update invite status
         cur.execute(
             "UPDATE caregiver_invites SET status = 'accepted' WHERE patient_id = %s AND caregiver_id = %s",
             (patient_id, current_user["id"])
         )
-
-        # Add to `caregiver_access`
         cur.execute(
-            "INSERT INTO caregiver_access (patient_id, caregiver_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            "INSERT INTO caregiver_access (patient_id, caregiver_id, can_edit_appointments, can_edit_medications, can_view_daily_tasks) VALUES (%s, %s, FALSE, FALSE, TRUE) ON CONFLICT DO NOTHING",
             (patient_id, current_user["id"])
         )
-
         conn.commit()
         return jsonify({"message": "Caregiver invite accepted!"})
-    except psycopg2.Error as e:
-        conn.rollback()
-        return jsonify({"error": str(e)}), 400
-    finally:
-        cur.close()
-        conn.close()
-
-# Decline Invite (Caregiver Only)
-@app.route("/decline-invite", methods=["POST"])
-@jwt_required()
-def decline_invite():
-    current_user = get_jwt_identity()
-    if current_user["role"] != "caregiver":
-        return jsonify({"error": "Only caregivers can decline invites"}), 403
-
-    data = request.get_json()
-    patient_id = data.get("patient_id")
-
-    conn, cur = get_db_connection()
-    if not conn:
-        return jsonify({"error": "Database connection failed"}), 500
-
-    try:
-        cur.execute(
-            "UPDATE caregiver_invites SET status = 'declined' WHERE patient_id = %s AND caregiver_id = %s",
-            (patient_id, current_user["id"])
-        )
-        conn.commit()
-        return jsonify({"message": "Caregiver invite declined!"})
     except psycopg2.Error as e:
         conn.rollback()
         return jsonify({"error": str(e)}), 400
