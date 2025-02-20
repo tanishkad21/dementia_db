@@ -143,6 +143,28 @@ def accept_invite():
         cur.close()
         conn.close()
 
+# Get Pending Invites (Caregiver Only) ✅ **Fixed**
+@app.route("/pending-invites", methods=["GET"])
+@jwt_required()
+def pending_invites():
+    caregiver_id = int(get_jwt_identity())  # Ensure it's an integer
+
+    conn, cur = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Database connection failed"}), 500
+
+    # Fetch pending invites for this caregiver
+    cur.execute(
+        "SELECT patient_id FROM caregiver_invites WHERE caregiver_id = %s AND status = 'pending'",
+        (caregiver_id,)
+    )
+    invites = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return jsonify({"pending_invites": [invite[0] for invite in invites]})
+
 # Get Patient Data (Caregivers Only)
 @app.route("/patient-data/<int:patient_id>", methods=["GET"])
 @jwt_required()
