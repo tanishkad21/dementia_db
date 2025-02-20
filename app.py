@@ -74,7 +74,7 @@ def login():
     conn.close()
 
     if user and check_password_hash(user[2], password):
-        token = create_access_token(identity={"id": user[0], "username": user[1], "role": user[3]})
+        token = create_access_token(identity=str(user[0]))  # Store ID as string
         return jsonify({"token": token, "role": user[3]})
     return jsonify({"error": "Invalid username or password"}), 401
 
@@ -82,12 +82,7 @@ def login():
 @app.route("/invite-caregiver", methods=["POST"])
 @jwt_required()
 def invite_caregiver():
-    current_user = get_jwt_identity()
-    if isinstance(current_user, str):
-        return jsonify({"error": "Token format issue"}), 400
-
-    if current_user["role"] != "patient":
-        return jsonify({"error": "Only patients can invite caregivers"}), 403
+    patient_id = int(get_jwt_identity())  # Ensure it's an integer
 
     data = request.get_json()
     caregiver_username = data.get("caregiver_username")
@@ -106,7 +101,7 @@ def invite_caregiver():
     try:
         cur.execute(
             "INSERT INTO caregiver_invites (patient_id, caregiver_id, status) VALUES (%s, %s, 'pending') ON CONFLICT DO NOTHING",
-            (current_user["id"], caregiver_id)
+            (patient_id, caregiver_id)
         )
         conn.commit()
         return jsonify({"message": "Caregiver invite sent successfully!"})
@@ -117,42 +112,11 @@ def invite_caregiver():
         cur.close()
         conn.close()
 
-# Get Pending Invites (Caregiver Only)
-@app.route("/pending-invites", methods=["GET"])
-@jwt_required()
-def pending_invites():
-    current_user = get_jwt_identity()
-    if isinstance(current_user, str):
-        return jsonify({"error": "Token format issue"}), 400
-
-    if current_user["role"] != "caregiver":
-        return jsonify({"error": "Only caregivers can view invites"}), 403
-
-    conn, cur = get_db_connection()
-    if not conn:
-        return jsonify({"error": "Database connection failed"}), 500
-
-    cur.execute(
-        "SELECT patient_id FROM caregiver_invites WHERE caregiver_id = %s AND status = 'pending'",
-        (current_user["id"],)
-    )
-    invites = cur.fetchall()
-    
-    cur.close()
-    conn.close()
-
-    return jsonify({"pending_invites": [invite[0] for invite in invites]})
-
 # Accept Invite (Caregiver Only)
 @app.route("/accept-invite", methods=["POST"])
 @jwt_required()
 def accept_invite():
-    current_user = get_jwt_identity()
-    if isinstance(current_user, str):
-        return jsonify({"error": "Token format issue"}), 400
-
-    if current_user["role"] != "caregiver":
-        return jsonify({"error": "Only caregivers can accept invites"}), 403
+    caregiver_id = int(get_jwt_identity())
 
     data = request.get_json()
     patient_id = data.get("patient_id")
@@ -164,11 +128,11 @@ def accept_invite():
     try:
         cur.execute(
             "UPDATE caregiver_invites SET status = 'accepted' WHERE patient_id = %s AND caregiver_id = %s",
-            (patient_id, current_user["id"])
+            (patient_id, caregiver_id)
         )
         cur.execute(
-            "INSERT INTO caregiver_access (patient_id, caregiver_id, can_edit_appointments, can_edit_medications, can_view_daily_tasks) VALUES (%s, %s, FALSE, FALSE, TRUE) ON CONFLICT DO NOTHING",
-            (patient_id, current_user["id"])
+            "INSERT INTO caregiver_access (patient_id, caregiver_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (patient_id, caregiver_id)
         )
         conn.commit()
         return jsonify({"message": "Caregiver invite accepted!"})
@@ -178,6 +142,47 @@ def accept_invite():
     finally:
         cur.close()
         conn.close()
+
+# Get Patient Data (Caregivers Only)
+@app.route("/patient-data/<int:patient_id>", methods=["GET"])
+@jwt_required()
+def get_patient_data(patient_id):
+    caregiver_id = int(get_jwt_identity())
+
+    conn, cur = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Database connection failed"}), 500
+
+    cur.execute(
+        "SELECT * FROM caregiver_access WHERE caregiver_id = %s AND patient_id = %s",
+        (caregiver_id, patient_id)
+    )
+    access = cur.fetchone()
+    
+    if not access:
+        return jsonify({"error": "Access denied"}), 403
+
+    cur.execute("SELECT id, name, username FROM users WHERE id = %s", (patient_id,))
+    patient = cur.fetchone()
+
+    cur.execute("SELECT id, title, date, description FROM appointments WHERE user_id = %s", (patient_id,))
+    appointments = cur.fetchall()
+
+    cur.execute("SELECT id, name, dosage, time, duration FROM medications WHERE user_id = %s", (patient_id,))
+    medications = cur.fetchall()
+
+    cur.execute("SELECT id, name, location, time, frequency FROM daily_tasks WHERE user_id = %s", (patient_id,))
+    daily_tasks = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return jsonify({
+        "patient": {"id": patient[0], "name": patient[1], "username": patient[2]},
+        "appointments": [{"id": appt[0], "title": appt[1], "date": appt[2], "description": appt[3]} for appt in appointments],
+        "medications": [{"id": med[0], "name": med[1], "dosage": med[2], "time": med[3], "duration": med[4]} for med in medications],
+        "daily_tasks": [{"id": task[0], "name": task[1], "location": task[2], "time": task[3], "frequency": task[4]} for task in daily_tasks]
+    })
 
 if __name__ == "__main__":
     app.run(debug=True)
