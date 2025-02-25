@@ -29,7 +29,7 @@ def get_db_connection():
 def home():
     return jsonify({"message": "Flask API is running on Render!"})
 
-# Register User (Patients & Caregivers)
+# Register User
 @app.route("/register", methods=["POST"])
 def register():
     data = request.get_json()
@@ -78,133 +78,110 @@ def login():
         return jsonify({"token": token, "role": user[3]})
     return jsonify({"error": "Invalid username or password"}), 401
 
-# Send Caregiver Invite (Patient Only)
-@app.route("/invite-caregiver", methods=["POST"])
-@jwt_required()
-def invite_caregiver():
-    patient_id = int(get_jwt_identity())  # Ensure it's an integer
-
-    data = request.get_json()
-    caregiver_username = data.get("caregiver_username")
-
+# Helper functions
+def fetch_results(query, params):
     conn, cur = get_db_connection()
     if not conn:
-        return jsonify({"error": "Database connection failed"}), 500
+        return None
+    cur.execute(query, params)
+    results = cur.fetchall()
+    cur.close()
+    conn.close()
+    return results
 
-    cur.execute("SELECT id FROM users WHERE username = %s AND role = 'caregiver'", (caregiver_username,))
-    caregiver = cur.fetchone()
-    if not caregiver:
-        return jsonify({"error": "Caregiver not found"}), 404
-
-    caregiver_id = caregiver[0]
-
+def execute_query(query, params):
+    conn, cur = get_db_connection()
+    if not conn:
+        return False
     try:
-        cur.execute(
-            "INSERT INTO caregiver_invites (patient_id, caregiver_id, status) VALUES (%s, %s, 'pending') ON CONFLICT DO NOTHING",
-            (patient_id, caregiver_id)
-        )
+        cur.execute(query, params)
         conn.commit()
-        return jsonify({"message": "Caregiver invite sent successfully!"})
-    except psycopg2.Error as e:
+        return True
+    except psycopg2.Error:
         conn.rollback()
-        return jsonify({"error": str(e)}), 400
+        return False
     finally:
         cur.close()
         conn.close()
 
-# Accept Invite (Caregiver Only)
-@app.route("/accept-invite", methods=["POST"])
+# Medications Endpoints
+@app.route("/medications", methods=["GET"])
 @jwt_required()
-def accept_invite():
-    caregiver_id = int(get_jwt_identity())
+def get_medications():
+    user_id = request.args.get("userId")
+    meds = fetch_results("SELECT id, name, dosage, time, duration, is_taken FROM medications WHERE user_id = %s", (user_id,))
+    return jsonify([{ "id": m[0], "name": m[1], "dosage": m[2], "time": m[3], "duration": m[4], "isTaken": m[5] } for m in meds])
 
+@app.route("/medications", methods=["POST"])
+@jwt_required()
+def add_medication():
+    user_id = request.args.get("userId")
     data = request.get_json()
-    patient_id = data.get("patient_id")
+    success = execute_query("INSERT INTO medications (user_id, name, dosage, time, duration, is_taken) VALUES (%s, %s, %s, %s, %s, %s)",
+        (user_id, data["name"], data["dosage"], data["time"], data["duration"], data["isTaken"]))
+    return jsonify({"message": "Medication added successfully!"} if success else {"error": "Failed to add medication"})
 
-    conn, cur = get_db_connection()
-    if not conn:
-        return jsonify({"error": "Database connection failed"}), 500
-
-    try:
-        cur.execute(
-            "UPDATE caregiver_invites SET status = 'accepted' WHERE patient_id = %s AND caregiver_id = %s",
-            (patient_id, caregiver_id)
-        )
-        cur.execute(
-            "INSERT INTO caregiver_access (patient_id, caregiver_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-            (patient_id, caregiver_id)
-        )
-        conn.commit()
-        return jsonify({"message": "Caregiver invite accepted!"})
-    except psycopg2.Error as e:
-        conn.rollback()
-        return jsonify({"error": str(e)}), 400
-    finally:
-        cur.close()
-        conn.close()
-
-# Get Pending Invites (Caregiver Only) ✅ **Fixed**
-@app.route("/pending-invites", methods=["GET"])
+@app.route("/medications/<int:id>", methods=["PUT"])
 @jwt_required()
-def pending_invites():
-    caregiver_id = int(get_jwt_identity())  # Ensure it's an integer
+def update_medication(id):
+    data = request.get_json()
+    success = execute_query("UPDATE medications SET name=%s, dosage=%s, time=%s, duration=%s, is_taken=%s WHERE id=%s",
+        (data["name"], data["dosage"], data["time"], data["duration"], data["isTaken"], id))
+    return jsonify({"message": "Medication updated successfully!"} if success else {"error": "Failed to update medication"})
 
-    conn, cur = get_db_connection()
-    if not conn:
-        return jsonify({"error": "Database connection failed"}), 500
-
-    # Fetch pending invites for this caregiver
-    cur.execute(
-        "SELECT patient_id FROM caregiver_invites WHERE caregiver_id = %s AND status = 'pending'",
-        (caregiver_id,)
-    )
-    invites = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    return jsonify({"pending_invites": [invite[0] for invite in invites]})
-
-# Get Patient Data (Caregivers Only)
-@app.route("/patient-data/<int:patient_id>", methods=["GET"])
+@app.route("/medications/<int:id>", methods=["DELETE"])
 @jwt_required()
-def get_patient_data(patient_id):
-    caregiver_id = int(get_jwt_identity())
+def delete_medication(id):
+    success = execute_query("DELETE FROM medications WHERE id=%s", (id,))
+    return jsonify({"message": "Medication deleted successfully!"} if success else {"error": "Failed to delete medication"})
 
-    conn, cur = get_db_connection()
-    if not conn:
-        return jsonify({"error": "Database connection failed"}), 500
+# Appointments Endpoints
+@app.route("/appointments", methods=["GET"])
+@jwt_required()
+def get_appointments():
+    user_id = request.args.get("userId")
+    appointments = fetch_results("SELECT id, title, date, description FROM appointments WHERE user_id = %s", (user_id,))
+    return jsonify([{ "id": a[0], "title": a[1], "date": a[2], "description": a[3] } for a in appointments])
 
-    cur.execute(
-        "SELECT * FROM caregiver_access WHERE caregiver_id = %s AND patient_id = %s",
-        (caregiver_id, patient_id)
-    )
-    access = cur.fetchone()
-    
-    if not access:
-        return jsonify({"error": "Access denied"}), 403
+@app.route("/appointments", methods=["POST"])
+@jwt_required()
+def add_appointment():
+    user_id = request.args.get("userId")
+    data = request.get_json()
+    success = execute_query("INSERT INTO appointments (user_id, title, date, description) VALUES (%s, %s, %s, %s)",
+        (user_id, data["title"], data["date"], data["description"]))
+    return jsonify({"message": "Appointment added successfully!"} if success else {"error": "Failed to add appointment"})
 
-    cur.execute("SELECT id, name, username FROM users WHERE id = %s", (patient_id,))
-    patient = cur.fetchone()
+@app.route("/appointments/<int:id>", methods=["PUT"])
+@jwt_required()
+def update_appointment(id):
+    data = request.get_json()
+    success = execute_query("UPDATE appointments SET title=%s, date=%s, description=%s WHERE id=%s",
+        (data["title"], data["date"], data["description"], id))
+    return jsonify({"message": "Appointment updated successfully!"} if success else {"error": "Failed to update appointment"})
 
-    cur.execute("SELECT id, title, date, description FROM appointments WHERE user_id = %s", (patient_id,))
-    appointments = cur.fetchall()
+@app.route("/appointments/<int:id>", methods=["DELETE"])
+@jwt_required()
+def delete_appointment(id):
+    success = execute_query("DELETE FROM appointments WHERE id=%s", (id,))
+    return jsonify({"message": "Appointment deleted successfully!"} if success else {"error": "Failed to delete appointment"})
 
-    cur.execute("SELECT id, name, dosage, time, duration FROM medications WHERE user_id = %s", (patient_id,))
-    medications = cur.fetchall()
+# Daily Tasks Endpoints
+@app.route("/daily_tasks", methods=["GET"])
+@jwt_required()
+def get_daily_tasks():
+    user_id = request.args.get("userId")
+    tasks = fetch_results("SELECT id, name, location, time, frequency FROM daily_tasks WHERE user_id = %s", (user_id,))
+    return jsonify([{ "id": t[0], "name": t[1], "location": t[2], "time": t[3], "frequency": t[4] } for t in tasks])
 
-    cur.execute("SELECT id, name, location, time, frequency FROM daily_tasks WHERE user_id = %s", (patient_id,))
-    daily_tasks = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    return jsonify({
-        "patient": {"id": patient[0], "name": patient[1], "username": patient[2]},
-        "appointments": [{"id": appt[0], "title": appt[1], "date": appt[2], "description": appt[3]} for appt in appointments],
-        "medications": [{"id": med[0], "name": med[1], "dosage": med[2], "time": med[3], "duration": med[4]} for med in medications],
-        "daily_tasks": [{"id": task[0], "name": task[1], "location": task[2], "time": task[3], "frequency": task[4]} for task in daily_tasks]
-    })
+@app.route("/daily_tasks", methods=["POST"])
+@jwt_required()
+def add_daily_task():
+    user_id = request.args.get("userId")
+    data = request.get_json()
+    success = execute_query("INSERT INTO daily_tasks (user_id, name, location, time, frequency) VALUES (%s, %s, %s, %s, %s)",
+        (user_id, data["name"], data["location"], data["time"], data["frequency"]))
+    return jsonify({"message": "Daily task added successfully!"} if success else {"error": "Failed to add daily task"})
 
 if __name__ == "__main__":
     app.run(debug=True)
