@@ -190,5 +190,6 @@ def add_appointment():
 
 # Start the application using Gunicorn/Waitress for production
 if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))  # Azure expects 8000
     from waitress import serve
-    serve(app, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    serve(app, host="0.0.0.0", port=port)
