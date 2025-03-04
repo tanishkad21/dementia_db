@@ -388,8 +388,5 @@ def get_daily_tasks():
 
     return jsonify([{ "id": t[0], "name": t[1], "location": t[2], "time": t[3], "frequency": t[4] } for t in tasks])
 
-# Start the application using Gunicorn/Waitress for production
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))  # Azure expects 8000
-    from waitress import serve
-    serve(app, host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
