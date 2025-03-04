@@ -83,6 +83,45 @@ def execute_query(query, params, fetch_one=False, fetch_all=False, return_id=Fal
 def home():
     return jsonify({"message": "Flask API is running successfully on Azure!"})
 
+# Register User
+@app.route("/register", methods=["POST"])
+def register():
+    """Registers a new user and stores their role in the database."""
+    data = request.get_json()
+    print("📡 Register API called with data:", data)
+    
+    username, password, name, role = data.get("username"), data.get("password"), data.get("name", "Unnamed User"), data.get("role")
+
+    if not username or not password or role not in ["patient", "caregiver"]:
+        return jsonify({"error": "Invalid registration data"}), 400
+
+    hashed_password = generate_password_hash(password)
+    user_id = execute_query(
+        "INSERT INTO users (name, username, password, role) VALUES (%s, %s, %s, %s) RETURNING id",
+        (name, username, hashed_password, role),
+        return_id=True
+    )
+
+    if not user_id:
+        return jsonify({"error": "Database error occurred"}), 500
+    
+    return jsonify({"message": "User registered successfully!", "userId": user_id, "role": role}), 201
+
+# Login & Generate JWT Token
+@app.route("/login", methods=["POST"])
+def login():
+    """Logs in a user and returns their role along with JWT token."""
+    data = request.get_json()
+    print("📡 Login API called with:", data)
+
+    username, password = data.get("username"), data.get("password")
+    user = execute_query("SELECT id, username, password, role FROM users WHERE username = %s", (username,), fetch_one=True)
+
+    if user and check_password_hash(user[2], password):
+        token = create_access_token(identity=user[0])  # Ensuring user ID is used in JWT
+        return jsonify({"token": token, "userId": user[0], "role": user[3]})  # ✅ Returns both userId & role
+
+    return jsonify({"error": "Invalid username or password"}), 401
 
 # ✅ Add Medication Endpoint
 
