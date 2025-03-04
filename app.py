@@ -2,10 +2,10 @@ from flask import Flask, request, jsonify
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 import psycopg2
 import os
+import subprocess  # ✅ Import subprocess for Gunicorn handling
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_cors import CORS
-from .db import execute_query  # Make sure this is available
-
+from .db import execute_query  # Make sure this exists
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -33,7 +33,7 @@ def log_request_info():
         try:
             print(f"📦 Body: {request.get_json()}")
         except Exception:
-            print("⚠️ Unable to parse JSON body.")
+            print("⚠️ Unable to parse JSON body.")  # ✅ No more crashes if JSON is missing or malformed
 
 # Database Connection Function
 def get_db_connection():
@@ -61,23 +61,19 @@ def execute_query(query, params=(), fetch_one=False, fetch_all=False, return_id=
         cur.execute(query, params)
 
         if return_id:
-            result = cur.fetchone()[0]
+            result = cur.fetchone()
             conn.commit()
-            print(f"✅ Inserted record with ID: {result}")
-            return result
+            return result[0] if result else None  # ✅ Prevents NoneType errors
 
         if fetch_one:
             result = cur.fetchone()
-            print(f"✅ Fetch One Result: {result}")
-            return result
+            return result if result else None
 
         if fetch_all:
             result = cur.fetchall()
-            print(f"✅ Fetch All Results: {result}")
-            return result
+            return result if result else []
 
         conn.commit()
-        print("✅ Query executed successfully!")
         return True
     except psycopg2.Error as e:
         conn.rollback()
@@ -89,26 +85,25 @@ def execute_query(query, params=(), fetch_one=False, fetch_all=False, return_id=
         if conn:
             conn.close()
 
-# API Health Check
+# 🔹 API Health Check
 @app.route("/")
 def home():
     return jsonify({"message": "Flask API is running successfully on Azure!"})
 
-
-# Database Health Check
+# 🔹 Database Health Check
 @app.route("/db-check")
 def db_check():
     """Check if the database connection is successful."""
     conn, cur = get_db_connection()
-    
-    if conn and cur:  # Ensure both are valid
+    if conn and cur:
         print("✅ Database connection verified.")
         cur.close()
         conn.close()
         return jsonify({"message": "Database connection is working!"}), 200
     
-    print("❌ Database connection failed.")  # Now this will always print properly
+    print("❌ Database connection failed.")
     return jsonify({"error": "Database connection failed"}), 500
+
 # Register User
 @app.route("/register", methods=["POST"])
 def register():
@@ -324,9 +319,13 @@ def delete_daily_task(id):
     return jsonify({"message": "Task deleted!" if success else "Failed to delete"}), 200 if success else 500
 
 
-# Start the application using Gunicornif __name__ == "__main__":
-    try:
-        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
-    except Exception as e:
-        print(f"🔥 Flask failed to start, running Gunicorn: {e}")
+# Start the application using Gunicorn
+if __name__ == "__main__":
+    print("🚀 Starting Flask application...")
+    if os.getenv("FLASK_ENV") == "development":
+        # Local Development Mode
+        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)), debug=True)
+    else:
+        # Production Mode - Use Gunicorn
+        print("🔥 Running in Production with Gunicorn")
         subprocess.run(["gunicorn", "-w", "4", "-b", "0.0.0.0:8000", "app:app"])
