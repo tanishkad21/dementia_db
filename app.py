@@ -114,26 +114,37 @@ def register():
 def login():
     """Logs in a user and returns their role along with JWT token."""
     data = request.get_json()
-    print(f"📡 Login API called: {request.method} {request.url}")
-    print(f"🔍 Request Data: {data}")
+    print("📡 Login API called with data:", data)
 
+    # Ensure username and password are provided
     username, password = data.get("username"), data.get("password")
     if not username or not password:
         print("❌ Missing username or password")
         return jsonify({"error": "Username and password required"}), 400
 
-    print(f"📊 Executing SQL: SELECT id, username, password, role FROM users WHERE username = '{username}'")
+    # Fetch user from database
     user = execute_query("SELECT id, username, password, role FROM users WHERE username = %s", (username,), fetch_one=True)
 
-    print(f"✅ Query Result: {user}") if user else print("❌ No user found!")
+    print(f"🔍 Retrieved user from DB: {user}")
 
     if user and check_password_hash(user[2], password):
-        token = create_access_token(identity=user[0])
-        print(f"✅ Login successful for user ID: {user[0]}, Role: {user[3]}")
-        return jsonify({"token": token, "userId": user[0], "role": user[3]})
+        user_id = str(user[0])  # Convert to string if needed for JWT
+        role = user[3]  # Retrieve user role
 
-    print("❌ Invalid login attempt")
+        # Create JWT token with user ID
+        token = create_access_token(identity=user_id)
+        print(f"✅ Login successful. Token generated for User ID: {user_id}, Role: {role}")
+
+        # Standardizing response field names
+        return jsonify({
+            "token": token,
+            "role": role,
+            "user_id": user_id  # Keep the same field name as old version
+        }), 200
+
+    print("❌ Invalid username or password")
     return jsonify({"error": "Invalid username or password"}), 401
+
 # ✅ Add Medication Endpoint
 
 @app.route("/medications", methods=["GET"])
