@@ -41,7 +41,7 @@ def get_db_connection():
         return None, None
 
 # Helper Function for Query Execution
-def execute_query(query, params, fetch_one=False, fetch_all=False, return_id=False):
+def execute_query(query, params=(), fetch_one=False, fetch_all=False, return_id=False):
     """ General function to execute queries safely. """
     conn, cur = get_db_connection()
     if not conn:
@@ -49,26 +49,27 @@ def execute_query(query, params, fetch_one=False, fetch_all=False, return_id=Fal
         return None
 
     try:
+        print(f"📊 Executing SQL: {query} | Params: {params}")
         cur.execute(query, params)
 
         if return_id:
             result = cur.fetchone()[0]
             conn.commit()
+            print(f"✅ Inserted record with ID: {result}")
             return result
 
         if fetch_one:
             result = cur.fetchone()
-            cur.close()
-            conn.close()
+            print(f"✅ Fetch One Result: {result}")
             return result
 
         if fetch_all:
             result = cur.fetchall()
-            cur.close()
-            conn.close()
+            print(f"✅ Fetch All Results: {result}")
             return result
 
         conn.commit()
+        print("✅ Query executed successfully!")
         return True
     except psycopg2.Error as e:
         conn.rollback()
@@ -82,6 +83,19 @@ def execute_query(query, params, fetch_one=False, fetch_all=False, return_id=Fal
 @app.route("/")
 def home():
     return jsonify({"message": "Flask API is running successfully on Azure!"})
+
+# Database Health Check
+@app.route("/db-check")
+def db_check():
+    """Check if the database connection is successful."""
+    conn, cur = get_db_connection()
+    if conn:
+        print("✅ Database connection verified.")
+        cur.close()
+        conn.close()
+        return jsonify({"message": "Database connection is working!"}), 200
+    print("❌ Database connection failed.")
+    return jsonify({"error": "Database connection failed"}), 500
 
 # Register User
 @app.route("/register", methods=["POST"])
@@ -99,7 +113,7 @@ def register():
 
     hashed_password = generate_password_hash(password)
     
-    print(f"📊 Executing SQL: INSERT INTO users (name, username, password, role) VALUES ('{name}', '{username}', <hashed_password>, '{role}')")
+    print(f"📊 Storing user: {username} - Role: {role}")
     user_id = execute_query(
         "INSERT INTO users (name, username, password, role) VALUES (%s, %s, %s, %s) RETURNING id",
         (name, username, hashed_password, role),
@@ -109,6 +123,7 @@ def register():
     print(f"✅ User registered successfully! User ID: {user_id}") if user_id else print("❌ User registration failed!")
 
     return jsonify({"message": "User registered successfully!", "userId": user_id, "role": role}) if user_id else jsonify({"error": "Database error occurred"}), 500
+
 # Login & Generate JWT Token
 @app.route("/login", methods=["POST"])
 def login():
@@ -135,7 +150,6 @@ def login():
         token = create_access_token(identity=user_id)
         print(f"✅ Login successful. Token generated for User ID: {user_id}, Role: {role}")
 
-        # Standardizing response field names
         return jsonify({
             "token": token,
             "role": role,
@@ -145,248 +159,6 @@ def login():
     print("❌ Invalid username or password")
     return jsonify({"error": "Invalid username or password"}), 401
 
-# ✅ Add Medication Endpoint
-
-@app.route("/medications", methods=["GET"])
-@jwt_required()
-def get_medications():
-    """Retrieve medications for the authenticated user."""
-    user_id = get_jwt_identity()
-    print(f"🔑 Extracted User ID: {user_id}")
-
-    print(f"📊 Executing SQL: SELECT * FROM medications WHERE user_id = {user_id}")
-    meds = execute_query(
-        "SELECT id, name, dosage, time, duration, is_taken FROM medications WHERE user_id = %s",
-        (user_id,),
-        fetch_all=True
-    )
-
-    print(f"✅ Query Result: {meds}") if meds else print("❌ No medications found!")
-
-    return jsonify([
-        {"id": m[0], "name": m[1], "dosage": m[2], "time": m[3], "duration": m[4], "isTaken": bool(m[5])}
-        for m in meds
-    ])
-@app.route("/medications", methods=["POST"])
-@jwt_required()
-def add_medication():
-    """Securely add a medication using JWT-based user identification."""
-    user_id = get_jwt_identity()
-    data = request.get_json()
-
-    print(f"📡 Received Medication Request for User {user_id}: {data}")
-
-    required_fields = ["name", "dosage", "time", "duration", "isTaken"]
-    if not all(field in data for field in required_fields):
-        return jsonify({"error": "Missing required fields"}), 400
-
-    inserted_id = execute_query(
-        "INSERT INTO medications (user_id, name, dosage, time, duration, is_taken) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-        (user_id, data["name"], data["dosage"], data["time"], data["duration"], data["isTaken"]),
-        return_id=True
-    )
-
-    if not inserted_id:
-        return jsonify({"error": "Failed to add medication"}), 500
-
-    new_medication = execute_query(
-        "SELECT id, name, dosage, time, duration, is_taken FROM medications WHERE id = %s",
-        (inserted_id,),
-        fetch_one=True
-    )
-
-    if not new_medication:
-        return jsonify({"error": "Failed to retrieve medication"}), 500
-
-    return jsonify({
-        "id": new_medication[0],
-        "name": new_medication[1],
-        "dosage": new_medication[2],
-        "time": new_medication[3],
-        "duration": new_medication[4],
-        "isTaken": bool(new_medication[5])
-    }), 201
-
-@app.route("/medications/<int:id>", methods=["DELETE"])
-@jwt_required()
-def delete_medication(id):
-    """Delete an existing medication for the authenticated user."""
-    user_id = get_jwt_identity()
-    print(f"🔑 Extracted User ID: {user_id}")
-
-    print(f"📊 Checking if medication ID {id} exists for user {user_id}")
-    existing_med = execute_query(
-        "SELECT id FROM medications WHERE id = %s AND user_id = %s",
-        (id, user_id),
-        fetch_one=True
-    )
-
-    if not existing_med:
-        print(f"❌ Medication ID {id} not found for user {user_id}")
-        return jsonify({"error": "Medication not found or access denied"}), 404
-
-    print(f"📊 Deleting medication ID {id} for user {user_id}")
-    success = execute_query("DELETE FROM medications WHERE id=%s AND user_id=%s", (id, user_id))
-
-    print(f"✅ Medication deleted successfully!") if success else print("❌ Failed to delete medication!")
-    return jsonify({"message": "Medication deleted successfully!"} if success else {"error": "Failed to delete medication"}), (200 if success else 500)
-
-# Update Medication
-@app.route("/medications/<int:id>", methods=["PUT"])
-@jwt_required()
-def update_medication(id):
-    """Update an existing medication for the authenticated user."""
-    user_id = get_jwt_identity()
-    data = request.get_json()
-    
-    required_fields = ["name", "dosage", "time", "duration", "isTaken"]
-    if not all(field in data for field in required_fields):
-        return jsonify({"error": "Missing required fields"}), 400
-
-    # Ensure medication exists and belongs to the user
-    existing_med = execute_query(
-        "SELECT id FROM medications WHERE id = %s AND user_id = %s",
-        (id, user_id),
-        fetch_one=True
-    )
-
-    if not existing_med:
-        return jsonify({"error": "Medication not found or access denied"}), 404
-
-    success = execute_query(
-        "UPDATE medications SET name=%s, dosage=%s, time=%s, duration=%s, is_taken=%s WHERE id=%s AND user_id=%s",
-        (data["name"], data["dosage"], data["time"], data["duration"], data["isTaken"], id, user_id)
-    )
-
-    return jsonify({"message": "Medication updated successfully!"} if success else {"error": "Failed to update medication"}), (200 if success else 500)
-
-@app.route("/appointments", methods=["GET"])
-@jwt_required()
-def get_appointments():
-    """Retrieve all appointments for the authenticated user."""
-    user_id = get_jwt_identity()
-    print(f"🔑 Extracted User ID: {user_id}")
-
-    print(f"📊 Executing SQL: SELECT id, title, date, description FROM appointments WHERE user_id = {user_id}")
-    appointments = execute_query(
-        "SELECT id, title, date, description FROM appointments WHERE user_id = %s",
-        (user_id,),
-        fetch_all=True
-    )
-
-    print(f"✅ Query Result: {appointments}") if appointments else print("❌ No appointments found!")
-
-    return jsonify([{ "id": a[0], "title": a[1], "date": a[2], "description": a[3] } for a in appointments])
-
-# Update Appointment
-@app.route("/appointments/<int:id>", methods=["PUT"])
-@jwt_required()
-def update_appointment(id):
-    """Update an existing appointment for the authenticated user."""
-    user_id = get_jwt_identity()
-    data = request.get_json()
-    required_fields = ["title", "date", "description"]
-
-    if not all(field in data for field in required_fields):
-        return jsonify({"error": "Missing required fields"}), 400
-
-    success = execute_query(
-        "UPDATE appointments SET title=%s, date=%s, description=%s WHERE id=%s AND user_id=%s",
-        (data["title"], data["date"], data["description"], id, user_id)
-    )
-
-    return jsonify({"message": "Appointment updated successfully!"} if success else {"error": "Failed to update appointment"}), (200 if success else 500)
-
-@app.route("/appointments", methods=["POST"])
-@jwt_required()
-def add_appointment():
-    """Create an appointment for the authenticated user."""
-    user_id = get_jwt_identity()
-    data = request.get_json()
-
-    print(f"📡 Received Appointment Request for User {user_id}: {data}")
-
-    inserted_id = execute_query(
-        "INSERT INTO appointments (user_id, title, date, description) VALUES (%s, %s, %s, %s) RETURNING id",
-        (user_id, data["title"], data["date"], data["description"]),
-        return_id=True
-    )
-
-    if not inserted_id:
-        print("❌ Failed to add appointment!")
-        return jsonify({"error": "Failed to add appointment"}), 500
-
-    print(f"✅ Appointment added successfully! ID: {inserted_id}")
-    return jsonify({"message": "Appointment added successfully!", "id": inserted_id}), 201
-
-# Delete Appointment
-@app.route("/appointments/<int:id>", methods=["DELETE"])
-@jwt_required()
-def delete_appointment(id):
-    """Delete an existing appointment for the authenticated user."""
-    user_id = get_jwt_identity()
-
-    success = execute_query("DELETE FROM appointments WHERE id=%s AND user_id=%s", (id, user_id))
-
-    return jsonify({"message": "Appointment deleted successfully!"} if success else {"error": "Failed to delete appointment"}), (200 if success else 500)
-# Update Daily Task
-@app.route("/daily_tasks", methods=["POST"])
-@jwt_required()
-def add_daily_task():
-    """Create a new daily task for the authenticated user."""
-    user_id = get_jwt_identity()
-    data = request.get_json()
-
-    print(f"📡 Received Daily Task Request for User {user_id}: {data}")
-
-    inserted_id = execute_query(
-        "INSERT INTO daily_tasks (user_id, name, location, time, frequency) VALUES (%s, %s, %s, %s, %s) RETURNING id",
-        (user_id, data["name"], data["location"], data["time"], data["frequency"]),
-        return_id=True
-    )
-
-    if not inserted_id:
-        print("❌ Failed to add daily task!")
-        return jsonify({"error": "Failed to add daily task"}), 500
-
-    print(f"✅ Daily task added successfully! ID: {inserted_id}")
-    return jsonify({"message": "Daily task added successfully!", "id": inserted_id}), 201
-
-@app.route("/daily_tasks/<int:id>", methods=["PUT"])
-@jwt_required()
-def update_daily_task(id):
-    """Update an existing daily task for the authenticated user."""
-    user_id = get_jwt_identity()
-    data = request.get_json()
-    required_fields = ["name", "location", "time", "frequency"]
-
-    if not all(field in data for field in required_fields):
-        return jsonify({"error": "Missing required fields"}), 400
-
-    success = execute_query(
-        "UPDATE daily_tasks SET name=%s, location=%s, time=%s, frequency=%s WHERE id=%s AND user_id=%s",
-        (data["name"], data["location"], data["time"], data["frequency"], id, user_id)
-    )
-
-    return jsonify({"message": "Daily task updated successfully!"} if success else {"error": "Failed to update daily task"}), (200 if success else 500)
-
-@app.route("/daily_tasks", methods=["GET"])
-@jwt_required()
-def get_daily_tasks():
-    """Retrieve all daily tasks for the authenticated user."""
-    user_id = get_jwt_identity()
-    print(f"🔑 Extracted User ID: {user_id}")
-
-    print(f"📊 Executing SQL: SELECT id, name, location, time, frequency FROM daily_tasks WHERE user_id = {user_id}")
-    tasks = execute_query(
-        "SELECT id, name, location, time, frequency FROM daily_tasks WHERE user_id = %s",
-        (user_id,),
-        fetch_all=True
-    )
-
-    print(f"✅ Query Result: {tasks}") if tasks else print("❌ No daily tasks found!")
-
-    return jsonify([{ "id": t[0], "name": t[1], "location": t[2], "time": t[3], "frequency": t[4] } for t in tasks])
-
+# Start the application using Gunicorn
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
