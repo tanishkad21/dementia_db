@@ -89,44 +89,36 @@ def register():
     data = request.get_json()
     print("📡 Register API called with data:", data)
     
-    username, password, name, role = data.get("username"), data.get("password"), data.get("name", "Unnamed User"), data.get("role", "patient")
+    username, password, name, role = data.get("username"), data.get("password"), data.get("name", "Unnamed User"), data.get("role")
 
     if not username or not password or role not in ["patient", "caregiver"]:
         return jsonify({"error": "Invalid registration data"}), 400
 
     hashed_password = generate_password_hash(password)
-    success = execute_query(
+    user_id = execute_query(
         "INSERT INTO users (name, username, password, role) VALUES (%s, %s, %s, %s) RETURNING id",
         (name, username, hashed_password, role),
         return_id=True
     )
 
-    if not success:
+    if not user_id:
         return jsonify({"error": "Database error occurred"}), 500
     
-    return jsonify({"message": "User registered successfully!", "user_id": success}), 201
+    return jsonify({"message": "User registered successfully!", "userId": user_id, "role": role}), 201
 
 # Login & Generate JWT Token
 @app.route("/login", methods=["POST"])
 def login():
     data = request.get_json()
-    print("📡 Login API called with data:", data)
+    print("📡 Login API called with:", data)
 
     username, password = data.get("username"), data.get("password")
-    if not username or not password:
-        print("❌ Missing username or password")
-        return jsonify({"error": "Username and password required"}), 400
-
     user = execute_query("SELECT id, username, password, role FROM users WHERE username = %s", (username,), fetch_one=True)
-
-    print(f"🔍 Retrieved user from DB: {user}")
 
     if user and check_password_hash(user[2], password):
         token = create_access_token(identity=str(user[0]))
-        print("✅ Login successful, token generated.")
-        return jsonify({"token": token, "role": user[3], "user_id": user[0]}), 200
+        return jsonify({"token": token, "userId": user[0], "role": user[3]})  # ✅ Ensuring both userId and role are returned
 
-    print("❌ Invalid username or password")
     return jsonify({"error": "Invalid username or password"}), 401
 
 # Medications Endpoints
