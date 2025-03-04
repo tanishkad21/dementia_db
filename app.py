@@ -20,11 +20,20 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("❌ ERROR: DATABASE_URL is missing! Ensure it's set in Azure Configuration.")
 
+# Logging all incoming requests for debugging
+@app.before_request
+def log_request_info():
+    print(f"📡 API Request: {request.method} {request.url}")
+    print(f"🔍 Headers: {request.headers}")
+    print(f"📦 Body: {request.get_data().decode('utf-8')}")
+
 # Database Connection Function
 def get_db_connection():
     """ Establishes a database connection and returns the cursor. """
     try:
+        print("🔗 Connecting to the database...")
         conn = psycopg2.connect(DATABASE_URL, sslmode="require")  # Secure connection
+        print("✅ Database connection successful!")
         cur = conn.cursor()
         return conn, cur
     except Exception as e:
@@ -87,11 +96,15 @@ def register():
 
     hashed_password = generate_password_hash(password)
     success = execute_query(
-        "INSERT INTO users (name, username, password, role) VALUES (%s, %s, %s, %s)",
-        (name, username, hashed_password, role)
+        "INSERT INTO users (name, username, password, role) VALUES (%s, %s, %s, %s) RETURNING id",
+        (name, username, hashed_password, role),
+        return_id=True
     )
 
-    return jsonify({"message": "User registered successfully!"} if success else {"error": "Database error occurred"}), (201 if success else 500)
+    if not success:
+        return jsonify({"error": "Database error occurred"}), 500
+    
+    return jsonify({"message": "User registered successfully!", "user_id": success}), 201
 
 # Login & Generate JWT Token
 @app.route("/login", methods=["POST"])
@@ -100,93 +113,33 @@ def login():
     print("📡 Login API called with data:", data)
 
     username, password = data.get("username"), data.get("password")
+    if not username or not password:
+        print("❌ Missing username or password")
+        return jsonify({"error": "Username and password required"}), 400
+
     user = execute_query("SELECT id, username, password, role FROM users WHERE username = %s", (username,), fetch_one=True)
+
+    print(f"🔍 Retrieved user from DB: {user}")
 
     if user and check_password_hash(user[2], password):
         token = create_access_token(identity=str(user[0]))
-        return jsonify({"token": token, "role": user[3]})
+        print("✅ Login successful, token generated.")
+        return jsonify({"token": token, "role": user[3], "user_id": user[0]}), 200
 
+    print("❌ Invalid username or password")
     return jsonify({"error": "Invalid username or password"}), 401
-
-# ✅ Updated Medications Endpoint with Debugging & Returning Inserted Data
-@app.route("/medications", methods=["POST"])
-@jwt_required()
-def add_medication():
-    user_id = request.args.get("userId")
-    data = request.get_json()
-
-    print("📡 Received API request:", data)
-
-    if not data:
-        return jsonify({"error": "Invalid JSON data"}), 400
-
-    inserted_id = execute_query(
-        "INSERT INTO medications (user_id, name, dosage, time, duration, is_taken) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-        (user_id, data["name"], data["dosage"], data["time"], data["duration"], data["isTaken"]),
-        return_id=True
-    )
-
-    if not inserted_id:
-        return jsonify({"error": "Failed to add medication"}), 500
-
-    # Retrieve inserted medication
-    new_medication = execute_query(
-        "SELECT id, name, dosage, time, duration, is_taken FROM medications WHERE id = %s",
-        (inserted_id,),
-        fetch_one=True
-    )
-
-    if not new_medication:
-        return jsonify({"error": "Failed to retrieve medication"}), 500
-
-    return jsonify({
-        "id": new_medication[0],
-        "name": new_medication[1],
-        "dosage": new_medication[2],
-        "time": new_medication[3],
-        "duration": new_medication[4],
-        "isTaken": new_medication[5]
-    })
 
 # Medications Endpoints
 @app.route("/medications", methods=["GET"])
 @jwt_required()
 def get_medications():
-    user_id = request.args.get("userId")
+    user_id = get_jwt_identity()
     meds = execute_query(
         "SELECT id, name, dosage, time, duration, is_taken FROM medications WHERE user_id = %s",
         (user_id,),
         fetch_all=True
     )
     return jsonify([{ "id": m[0], "name": m[1], "dosage": m[2], "time": m[3], "duration": m[4], "isTaken": m[5] } for m in meds])
-
-@app.route("/medications/<int:id>", methods=["PUT"])
-@jwt_required()
-def update_medication(id):
-    data = request.get_json()
-    success = execute_query(
-        "UPDATE medications SET name=%s, dosage=%s, time=%s, duration=%s, is_taken=%s WHERE id=%s",
-        (data["name"], data["dosage"], data["time"], data["duration"], data["isTaken"], id)
-    )
-    return jsonify({"message": "Medication updated successfully!"} if success else {"error": "Failed to update medication"})
-
-@app.route("/medications/<int:id>", methods=["DELETE"])
-@jwt_required()
-def delete_medication(id):
-    success = execute_query("DELETE FROM medications WHERE id=%s", (id,))
-    return jsonify({"message": "Medication deleted successfully!"} if success else {"error": "Failed to delete medication"})
-
-# ✅ Appointments and Daily Tasks remain unchanged but use the new helper function
-@app.route("/appointments", methods=["POST"])
-@jwt_required()
-def add_appointment():
-    user_id = request.args.get("userId")
-    data = request.get_json()
-    success = execute_query(
-        "INSERT INTO appointments (user_id, title, date, description) VALUES (%s, %s, %s, %s)",
-        (user_id, data["title"], data["date"], data["description"])
-    )
-    return jsonify({"message": "Appointment added successfully!"} if success else {"error": "Failed to add appointment"})
 
 # Start the application using Gunicorn/Waitress for production
 if __name__ == "__main__":
