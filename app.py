@@ -83,55 +83,256 @@ def execute_query(query, params, fetch_one=False, fetch_all=False, return_id=Fal
 def home():
     return jsonify({"message": "Flask API is running successfully on Azure!"})
 
-# Register User
-@app.route("/register", methods=["POST"])
-def register():
-    data = request.get_json()
-    print("📡 Register API called with data:", data)
-    
-    username, password, name, role = data.get("username"), data.get("password"), data.get("name", "Unnamed User"), data.get("role")
 
-    if not username or not password or role not in ["patient", "caregiver"]:
-        return jsonify({"error": "Invalid registration data"}), 400
+# ✅ Add Medication Endpoint
 
-    hashed_password = generate_password_hash(password)
-    user_id = execute_query(
-        "INSERT INTO users (name, username, password, role) VALUES (%s, %s, %s, %s) RETURNING id",
-        (name, username, hashed_password, role),
-        return_id=True
-    )
-
-    if not user_id:
-        return jsonify({"error": "Database error occurred"}), 500
-    
-    return jsonify({"message": "User registered successfully!", "userId": user_id, "role": role}), 201
-
-# Login & Generate JWT Token
-@app.route("/login", methods=["POST"])
-def login():
-    data = request.get_json()
-    print("📡 Login API called with:", data)
-
-    username, password = data.get("username"), data.get("password")
-    user = execute_query("SELECT id, username, password, role FROM users WHERE username = %s", (username,), fetch_one=True)
-
-    if user and check_password_hash(user[2], password):
-        token = create_access_token(identity=str(user[0]))
-        return jsonify({"token": token, "userId": user[0], "role": user[3]})  # ✅ Ensuring both userId and role are returned
-
-    return jsonify({"error": "Invalid username or password"}), 401
-
-# Medications Endpoints
 @app.route("/medications", methods=["GET"])
 @jwt_required()
 def get_medications():
-    user_id = get_jwt_identity()
+    """Retrieve medications for the authenticated user."""
+    user_id = get_jwt_identity()  # Extract user ID from the JWT token
+
+    # Retrieve medications only for the logged-in user
     meds = execute_query(
         "SELECT id, name, dosage, time, duration, is_taken FROM medications WHERE user_id = %s",
         (user_id,),
         fetch_all=True
     )
-    return jsonify([{ "id": m[0], "name": m[1], "dosage": m[2], "time": m[3], "duration": m[4], "isTaken": m[5] } for m in meds])
+
+    if meds is None:  # Handle possible query failure
+        return jsonify({"error": "Failed to fetch medications"}), 500
+
+    return jsonify([
+        {
+            "id": m[0],
+            "name": m[1],
+            "dosage": m[2],
+            "time": m[3],
+            "duration": m[4],
+            "isTaken": bool(m[5])  # Ensure correct boolean format
+        }
+        for m in meds
+    ]), 200
+
+@app.route("/medications", methods=["POST"])
+@jwt_required()
+def add_medication():
+    """Securely add a medication using JWT-based user identification."""
+    user_id = get_jwt_identity()  # Extract user ID from JWT token
+    data = request.get_json()  # Get JSON request body
+
+    print(f"📡 Received Medication Request for User {user_id}: {data}")
+
+    # Ensure all required fields are provided
+    required_fields = ["name", "dosage", "time", "duration", "isTaken"]
+    if not all(field in data for field in required_fields):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    # Insert medication with correct user_id
+    inserted_id = execute_query(
+        "INSERT INTO medications (user_id, name, dosage, time, duration, is_taken) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+        (user_id, data["name"], data["dosage"], data["time"], data["duration"], data["isTaken"]),
+        return_id=True
+    )
+
+    if not inserted_id:
+        return jsonify({"error": "Failed to add medication"}), 500
+
+    # Retrieve newly inserted medication
+    new_medication = execute_query(
+        "SELECT id, name, dosage, time, duration, is_taken FROM medications WHERE id = %s",
+        (inserted_id,),
+        fetch_one=True
+    )
+
+    if not new_medication:
+        return jsonify({"error": "Failed to retrieve medication"}), 500
+
+    return jsonify({
+        "id": new_medication[0],
+        "name": new_medication[1],
+        "dosage": new_medication[2],
+        "time": new_medication[3],
+        "duration": new_medication[4],
+        "isTaken": bool(new_medication[5])  # Ensure boolean format
+    }), 201
+
+# Get Appointments for User
+@app.route("/appointments", methods=["GET"])
+@jwt_required()
+def get_appointments():
+    """Retrieve all appointments for the authenticated user."""
+    user_id = get_jwt_identity()
+    appointments = execute_query(
+        "SELECT id, title, date, description FROM appointments WHERE user_id = %s",
+        (user_id,),
+        fetch_all=True
+    )
+    return jsonify([{ "id": a[0], "title": a[1], "date": a[2], "description": a[3] } for a in appointments])
+
+# Add a New Appointment
+@app.route("/appointments", methods=["POST"])
+@jwt_required()
+def add_appointment():
+    """Create an appointment for the authenticated user."""
+    user_id = get_jwt_identity()
+    data = request.get_json()
+
+    inserted_id = execute_query(
+        "INSERT INTO appointments (user_id, title, date, description) VALUES (%s, %s, %s, %s) RETURNING id",
+        (user_id, data["title"], data["date"], data["description"]),
+        return_id=True
+    )
+
+    if not inserted_id:
+        return jsonify({"error": "Failed to add appointment"}), 500
+
+    return jsonify({"message": "Appointment added successfully!", "id": inserted_id}), 201
+
+# Get Daily Tasks for User
+@app.route("/daily_tasks", methods=["GET"])
+@jwt_required()
+def get_daily_tasks():
+    """Retrieve all daily tasks for the authenticated user."""
+    user_id = get_jwt_identity()
+    tasks = execute_query(
+        "SELECT id, name, location, time, frequency FROM daily_tasks WHERE user_id = %s",
+        (user_id,),
+        fetch_all=True
+    )
+    return jsonify([{ "id": t[0], "name": t[1], "location": t[2], "time": t[3], "frequency": t[4] } for t in tasks])
+
+# Add a New Daily Task
+@app.route("/daily_tasks", methods=["POST"])
+@jwt_required()
+def add_daily_task():
+    """Create a new daily task for the authenticated user."""
+    user_id = get_jwt_identity()
+    data = request.get_json()
+
+    inserted_id = execute_query(
+        "INSERT INTO daily_tasks (user_id, name, location, time, frequency) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        (user_id, data["name"], data["location"], data["time"], data["frequency"]),
+        return_id=True
+    )
+
+    if not inserted_id:
+        return jsonify({"error": "Failed to add daily task"}), 500
+
+    return jsonify({"message": "Daily task added successfully!", "id": inserted_id}), 201
+# Update Medication
+@app.route("/medications/<int:id>", methods=["PUT"])
+@jwt_required()
+def update_medication(id):
+    """Update an existing medication for the authenticated user."""
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    
+    required_fields = ["name", "dosage", "time", "duration", "isTaken"]
+    if not all(field in data for field in required_fields):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    # Ensure medication exists and belongs to the user
+    existing_med = execute_query(
+        "SELECT id FROM medications WHERE id = %s AND user_id = %s",
+        (id, user_id),
+        fetch_one=True
+    )
+
+    if not existing_med:
+        return jsonify({"error": "Medication not found or access denied"}), 404
+
+    success = execute_query(
+        "UPDATE medications SET name=%s, dosage=%s, time=%s, duration=%s, is_taken=%s WHERE id=%s AND user_id=%s",
+        (data["name"], data["dosage"], data["time"], data["duration"], data["isTaken"], id, user_id)
+    )
+
+    return jsonify({"message": "Medication updated successfully!"} if success else {"error": "Failed to update medication"}), (200 if success else 500)
+
+# Delete Medication
+@app.route("/medications/<int:id>", methods=["DELETE"])
+@jwt_required()
+def delete_medication(id):
+    """Delete an existing medication for the authenticated user."""
+    user_id = get_jwt_identity()
+
+    # Ensure medication exists and belongs to the user before deleting
+    existing_med = execute_query(
+        "SELECT id FROM medications WHERE id = %s AND user_id = %s",
+        (id, user_id),
+        fetch_one=True
+    )
+
+    if not existing_med:
+        return jsonify({"error": "Medication not found or access denied"}), 404
+
+    success = execute_query(
+        "DELETE FROM medications WHERE id=%s AND user_id=%s", (id, user_id)
+    )
+
+    return jsonify({"message": "Medication deleted successfully!"} if success else {"error": "Failed to delete medication"}), (200 if success else 500)
+
+# Update Appointment
+@app.route("/appointments/<int:id>", methods=["PUT"])
+@jwt_required()
+def update_appointment(id):
+    """Update an existing appointment for the authenticated user."""
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    required_fields = ["title", "date", "description"]
+
+    if not all(field in data for field in required_fields):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    success = execute_query(
+        "UPDATE appointments SET title=%s, date=%s, description=%s WHERE id=%s AND user_id=%s",
+        (data["title"], data["date"], data["description"], id, user_id)
+    )
+
+    return jsonify({"message": "Appointment updated successfully!"} if success else {"error": "Failed to update appointment"}), (200 if success else 500)
+
+
+# Delete Appointment
+@app.route("/appointments/<int:id>", methods=["DELETE"])
+@jwt_required()
+def delete_appointment(id):
+    """Delete an existing appointment for the authenticated user."""
+    user_id = get_jwt_identity()
+
+    success = execute_query("DELETE FROM appointments WHERE id=%s AND user_id=%s", (id, user_id))
+
+    return jsonify({"message": "Appointment deleted successfully!"} if success else {"error": "Failed to delete appointment"}), (200 if success else 500)
+# Update Daily Task
+@app.route("/daily_tasks/<int:id>", methods=["PUT"])
+@jwt_required()
+def update_daily_task(id):
+    """Update an existing daily task for the authenticated user."""
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    required_fields = ["name", "location", "time", "frequency"]
+
+    if not all(field in data for field in required_fields):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    success = execute_query(
+        "UPDATE daily_tasks SET name=%s, location=%s, time=%s, frequency=%s WHERE id=%s AND user_id=%s",
+        (data["name"], data["location"], data["time"], data["frequency"], id, user_id)
+    )
+
+    return jsonify({"message": "Daily task updated successfully!"} if success else {"error": "Failed to update daily task"}), (200 if success else 500)
+
+
+# Delete Daily Task
+@app.route("/daily_tasks/<int:id>", methods=["DELETE"])
+@jwt_required()
+def delete_daily_task(id):
+    """Delete an existing daily task for the authenticated user."""
+    user_id = get_jwt_identity()
+
+    success = execute_query("DELETE FROM daily_tasks WHERE id=%s AND user_id=%s", (id, user_id))
+
+    return jsonify({"message": "Daily task deleted successfully!"} if success else {"error": "Failed to delete daily task"}), (200 if success else 500)
+
 
 # Start the application using Gunicorn/Waitress for production
 if __name__ == "__main__":
