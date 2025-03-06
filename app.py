@@ -5,7 +5,7 @@ import os
 import subprocess  # ✅ Import subprocess for Gunicorn handling
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_cors import CORS
-from .db import execute_query  # Make sure this exists
+  # Make sure this exists
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -328,4 +328,5 @@ if __name__ == "__main__":
     else:
         # Production Mode - Use Gunicorn
         print("🔥 Running in Production with Gunicorn")
-        subprocess.run(["gunicorn", "-w", "4", "-b", "0.0.0.0:8000", "app:app"])
+        subprocess.Popen(["gunicorn", "-w", "4", "-b", "0.0.0.0:8000", "app:app"])  # ✅ Runs in background
+
